@@ -1,0 +1,246 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Downloading the packages via GithHub
+# devtools::install_github("stan-dev/cmdstanr")
+# devtools::install_github("rmcelreath/rethinking")
+
+pacman::p_load(utils,tidyverse, patchwork, ggplot2, lme4, stats, grid, ggpubr, ggrepel, graphics,effects,VCA, stringi, gridExtra, MuMIn,dfoptim, Rcpp,dplyr, pacman,lmerTest,boot, dagitty,rstan,rethinking,truncnorm,jsonlite, devtools, coda, mvtnorm, devtools, loo, cmdstanr, ggdag)
+```
+
+
+```{r}
+# Setting the path for the data frames for analysis
+path <- "/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/dataframes_of_parameters/"
+
+# Loading the data for the three different parameters:
+# Load the csv file from the path:
+
+
+# x1 evolution rate
+df_x1_e_rate <- read.csv(paste0(path, "data_frame_x1_e_rate.csv"), header = TRUE, sep = ",")
+
+# x2 evolution rate
+df_x2_e_rate <- read.csv(paste0(path, "data_frame_x2_e_rate.csv"), header = TRUE, sep = ",")
+
+# x3 evolution rate
+df_x3_e_rate <- read.csv(paste0(path, "data_frame_x3_e_rate.csv"), header = TRUE, sep = ",")
+
+
+# Loading in the big joined df, with all of the variables.
+big_df = read.csv("/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/big_joined_df.csv")
+
+big_df_filtered <- big_df[!apply(big_df == "ZERO", 1, any), ]
+
+big_df_filtered <- big_df_filtered[!apply(is.na(big_df_filtered) == TRUE, 1, any), ]
+
+
+# Removing the '...1' colum, since we don't need it, and it made the analysis act up in earlier tries
+big_df_filtered <- big_df_filtered[, !colnames(big_df_filtered) %in% c("...1")]
+
+# Making the ID column into a factor, sicnce otherwise the variable is not gonna be viable for the multilevel model
+big_df_filtered$ID = as.factor(big_df_filtered$ID)
+
+# Defining function, that converts the 'confidence' column to be in a range, that is between the maximum range of [0:1]
+shrink = function(x,d){
+  x = x/max(x)
+  x = (x-0.5)*d + 0.5
+}
+
+big_df_filtered$confidence = shrink(big_df_filtered$confidence, 0.999999)
+
+
+# Adding a column to big_df_filterd, which is the absolute value of the value prediction error of u:
+big_df_filtered = big_df_filtered %>% 
+  mutate(abs_PE_u_val = abs(u_val_pred_err))
+
+# Editing the abs_PE_u_val column, so it doesn't have any zero-values (otherwise, taking the log of the column is going to be weird)
+# This will be done by performing an additive shift (adding a constant to all of the values)
+
+big_df_filtered = big_df_filtered %>% 
+  mutate(abs_PE_u_val = abs_PE_u_val+0.000001) # Choosing a low constant, since the lowest, non-zero value of the absolute value of the PE of u is 0.0002461697
+
+# Adding a column to big_df_filtered, which is the log of the absolute PE of u (so the variable is better suited for the regression):
+big_df_filtered = big_df_filtered %>% 
+  mutate(log_abs_PE_u_val = log(abs_PE_u_val))
+
+# Now, we take the confidence values that are between 0 and 1 (more narrow, but close), 
+# and then we map them form the unit interval (0 to 1) to the real line (-inf to inf),
+# so we can use 'confidence' as the outcome variable in a standard regression
+big_df_filtered$confidence = logit(big_df_filtered$confidence)
+
+# Transforming the variable PDI_total, since Nace said it is very skewed
+# Also consider scaling the variables, but be aware of what that will entail the analysis
+## Nb for above, it is log transformed, so it is harder to interpret 
+big_df_filtered = big_df_filtered %>%
+  mutate(pdi_transformed = log((pdi_total/max(pdi_total)) + 0.01)) 
+
+# Removing (ID 22, session 1), since the response in that session was wacko (see the 'r_scripts/data_filtering_PIT.rmd')
+big_df_filtered <- big_df_filtered %>% 
+  filter(!(ID == 22 & session == 1))
+
+df_x1_e_rate <- df_x1_e_rate %>% 
+  filter(!(ID == 22 & session == 1))
+
+df_x2_e_rate <- df_x2_e_rate %>% 
+  filter(!(ID == 22 & session == 1))
+
+df_x3_e_rate<- df_x3_e_rate %>% 
+  filter(!(ID == 22 & session == 1))
+
+# Making the ID column into a factor, since this is needed, if we want to use it as a lower level in a multilevel model
+df_x1_e_rate$ID = as.factor(df_x1_e_rate$ID)
+
+df_x2_e_rate$ID = as.factor(df_x2_e_rate$ID)
+
+df_x3_e_rate$ID = as.factor(df_x3_e_rate$ID)
+
+
+# Transforming the pdi_total variable for all x_e_rate dfs, in order to make it more normal:
+df_x1_e_rate = df_x1_e_rate %>%
+  mutate(pdi_transformed = log((pdi_total/max(pdi_total)) + 0.01)) 
+
+df_x2_e_rate = df_x2_e_rate %>%
+  mutate(pdi_transformed = log((pdi_total/max(pdi_total)) + 0.01)) 
+
+df_x3_e_rate = df_x3_e_rate %>%
+  mutate(pdi_transformed = log((pdi_total/max(pdi_total)) + 0.01)) 
+
+# Making a column that is the confidence for the next trial, since I want to model how the prediction 
+# error of the current input affects one's confidence about the next input. Since the confidence is measure first, and then it is the prediction error, this was need to be done. 
+# And then I'm removing the rows with NA's for the confidence, since that data input is not usable.
+big_df_filtered_last_trial_removed = big_df_filtered %>%
+ group_by(ID, session) %>%
+ mutate(conf_next_trial = c(tail(confidence, -1), NA)) %>% 
+  filter(is.na(conf_next_trial) == FALSE)
+
+## This was used to check whether the above operation was succesful
+# big_df_filtered %>% 
+#   filter(ID == 42) %>% 
+#   select(trials,confidence, conf_next_trial)
+```
+
+```{r x1 model run}
+# Start of by rebuilding the stan
+rebuild_cmdstan()
+
+# Setting the seed, for reproduceability
+set.seed(420)
+
+# Building the model, first the simple version
+x1_simple_model <- ulam(
+    alist(
+        mean ~ dnorm( mu , sigma ),
+        mu <- a + b_pdi*pdi_total,
+        a ~ dnorm(-1.5, 0.5), # Adding the a_bar should make random intercepts for ID, 
+        # (tried to follow the format from 'Statistical Rethinking, p. ~415)
+        b_pdi ~ dnorm(0,5), # Wide prior 
+        sigma ~ dexp(1) # Setting it to two, because I think that setting it to 1 would be to wide of a prior
+    ) , data = df_x1_e_rate, iter = 1000, chains=10, cores = 4, refresh = 0, log_lik=TRUE )
+
+saveRDS(x1_simple_model, "/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/ulam_models/x1_simple_model.rds")
+
+precis_x1_simple_model = precis(x1_simple_model)
+
+saveRDS(precis_x1_simple_model, "/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/ulam_models/precis_x1_simple_model.rds")
+
+precis(x1_simple_model)
+plot(precis(x1_simple_model))
+```
+The credible interval of the posterior distribution of coef estimate, b, which is for the predictor value of pdi_total is the following:
+_**b:**_ mean = -0.44, sd = 0.17, credible interval: 5.5 % = -0.70, 94.5 % = -0.17
+
+The parameter estimates therefore suggests, that the greater the Peter's et al., Delusions Inventory score of the participant, the lower the evolution rate/omega of the x1 node is. 
+
+The lower the evolution rate/omega is for the x1 node, the less the posterior mean of the x1 node (which is directly mapped to action [along with the GAP]) will "follow" the data, meaning that the posterior mean will not be as volatile, as the data is.
+
+
+Now on to the model for the x2 evolution rate
+```{r x2 model run}
+set.seed(420); x2_simple_model <- ulam(
+    alist(
+        mean ~ dnorm( mu , sigma ),
+        mu <- a + b_pdi*pdi_total,
+        a ~ dnorm(-5, 0.7),  # Choosing the intercept based on the mean of the parameter estimate
+        b_pdi ~ dnorm(0,5),
+        sigma ~ dexp(1)
+    ) , data = df_x2_e_rate, iter = 1000, chains=10, cores = 4, refresh = 0, log_lik=TRUE )
+
+saveRDS(x2_simple_model, "/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/ulam_models/x2_simple_model.rds")
+
+precis_x2_simple_model = precis(x2_simple_model)
+
+saveRDS(precis_x2_simple_model, "/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/ulam_models/precis_x2_simple_model.rds")
+
+precis(x2_simple_model)
+plot(precis(x2_simple_model))
+```
+_**b:**_ mean = -0.19, sd = 0.36, credible interval: 5.5 % = -0.76, 94.5 % = 0.38
+
+The credible interval of the coef parameter b includes zero, which is not "far away" from the mean, meaning that zero is well-within the credible interval.
+
+This suggests that the PDI score of the participant has no influence on the evolution rate of the x2 node in the JGET
+
+Now on to the model for the x3 evolution rate
+```{r x3 model run}
+set.seed(420); x3_simple_model <- ulam(
+    alist(
+        mean ~ dnorm( mu , sigma ),
+        mu <- a + b_pdi*pdi_total,
+        a ~ dnorm(-6.2, 0.75),  # Choosing the intercept based on the mean of the parameter estimate
+        b_pdi ~ dnorm(0,5),
+        sigma ~ dexp(1)
+    ) , data = df_x3_e_rate, iter = 1000, chains=10, cores = 4, refresh = 0, log_lik=TRUE )
+
+saveRDS(x3_simple_model, "/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/ulam_models/x3_simple_model.rds")
+
+precis_x3_simple_model = precis(x3_simple_model)
+
+saveRDS(precis_x3_simple_model, "/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/ulam_models/precis_x3_simple_model.rds")
+```
+
+
+```{r x3 model run}
+precis(x3_simple_model)
+plot(precis(x3_simple_model))
+```
+
+_**b:**_ mean = -0.32, sd = 0.38, credible interval: 5.5 % = -0.93, 94.5 % = 0.28
+
+The credible interval of the coef parameter b includes zero, which is not "far away" from the mean, meaning that zero is well-within the credible interval.
+
+This suggests that the PDI score of the participant has no influence on the evolution rate of the x3 node in the JGET
+
+```{r confidence model}
+set.seed(420); confidence_model <- ulam(
+    alist(
+        confidence ~ dnorm( mu , sigma ),
+        mu <- a + b_x2_pm*x2_post_mean + b_x3_pm*x3_post_mean + b_pdi*pdi_total,
+        a ~ dnorm(-0.34, 2),
+        b_x2_pm ~ dnorm(0,5),
+        b_x3_pm ~ dnorm(0,5),
+        b_pdi ~ dnorm(0,5),
+        sigma ~ dexp(1)
+    ) , data = big_df_filtered, iter = 1000, chains=4, cores = 4, refresh = 0, log_lik=TRUE )
+
+saveRDS(confidence_model, "/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/ulam_models/confidence_model.rds")
+
+precis_confidence_model = precis(confidence_model)
+
+saveRDS(precis_confidence_model, "/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/ulam_models/precis_confidence_model.rds")
+
+
+precis_confidence_model
+plot(precis_confidence_model)
+```
+
+
+
+
+
+
+
+
+
+

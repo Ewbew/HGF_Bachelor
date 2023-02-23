@@ -1,0 +1,44 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+pacman::p_load(utils,tidyverse, patchwork, ggplot2, lme4, stats, grid, ggpubr, ggrepel, graphics,effects,VCA, vroom, readbulk,stringi, gridExtra, MuMIn,dfoptim, reticulate, Rcpp,dplyr, pacman,lmerTest,boot, dagitty,rstan,rethinking,truncnorm)
+```
+
+```{r Loading in the data (main data and PDI-scores)}
+# Assigning the data into a variable
+unfiltered_pit = readRDS("/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/experiment_trialdata.csv") 
+# Assigning the data into a variable
+pit_PDI_scores = read_csv("/Users/ottosejrskildsantesson/Desktop/Bachelor/HGF_Bachelor/data/pdi_scores.csv")
+```
+
+```{r Filtering the main data to be compatible with the PDI scores}
+unfiltered_pit_PDI = unfiltered_pit %>% 
+  filter(unfiltered_pit$ID %in% pit_PDI_scores$participant)
+```
+
+```{r Combining the unfiltered_pit_PDI data with the }
+pit_PDI_scores$participant = as.factor(pit_PDI_scores$participant)
+# The two columns need to be of the same data type, before the two dataframes can be combined
+
+unfiltered_pit_w_PDI = left_join(unfiltered_pit_PDI, pit_PDI_scores, by = c("ID" = "participant"))
+```
+
+```{r Removing NaNs from the data}
+# So, I found out while running the for-loop in the 'fitting_all_the_fits.jl' file that there
+# are some NaNs in the data.
+# So, I've completely removed the data for ID_23_session_4, since the NaNs were intervening in the data.
+# For the other removals of NaNs, they weren't intervening, so I just removed the individual trials (except for 
+# ID_24_session_2, because there were some non-NaNs between trials 1-66, so I had to remove all of the trials for this 
+# ID and session combination)
+unfiltered_pit_w_PDI_no_NA = 
+  unfiltered_pit_w_PDI %>% 
+  filter(!(ID == 23 & session == 4)) %>% 
+  filter(!(ID == 24 & session == 2 & trials >= 1 & trials <= 66)) %>% 
+  filter(!is.na(response))
+```
+
+```{r Saving the filtered data into a CSV-file}
+## Writing out the CSV-file 
+write_csv(unfiltered_pit_w_PDI, "~/Desktop/Bachelor/HGF_Bachelor/data/pit_data_w_PDI.csv")
+write_csv(unfiltered_pit_w_PDI_no_NA, "~/Desktop/Bachelor/HGF_Bachelor/data/unfiltered_pit_w_PDI_no_NA.csv")
+```
